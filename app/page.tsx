@@ -18,6 +18,12 @@ interface Agent {
   colorHex: string;
   status: AgentStatus;
   pnl: number;
+  swarmEngine?: 'MiroFish' | 'BettaFish';
+  swarmActive?: boolean;
+  tradingPairs: string;
+  signalThreshold: number;
+  stopLoss: number;
+  takeProfit: number;
 }
 
 interface PriceData {
@@ -44,10 +50,10 @@ interface PnlHistoryData {
 const DEFAULT_PAIRS = ['btcusdt', 'ethusdt', 'solusdt', 'bnbusdt'];
 
 const INITIAL_AGENTS: Record<AgentId, Agent> = {
-  scout: { id: 'scout', name: 'Scout', role: 'Scalping', active: true, risk: 50, allocatedFunds: '', colorHex: '#22d3ee', status: 'SLEEP', pnl: 0 }, // Neon Turkuaz
-  hunter: { id: 'hunter', name: 'Hunter', role: 'Trend Following', active: false, risk: 30, allocatedFunds: '', colorHex: '#10b981', status: 'SLEEP', pnl: 0 }, // Neon Yesil
-  grid: { id: 'grid', name: 'Grid', role: 'Market Maker', active: false, risk: 20, allocatedFunds: '', colorHex: '#a855f7', status: 'SLEEP', pnl: 0 }, // Neon Mor
-  sentinel: { id: 'sentinel', name: 'Sentinel', role: 'Sentiment/News', active: true, risk: 40, allocatedFunds: '', colorHex: '#f59e0b', status: 'WATCHING', pnl: 0 }, // Neon Sari
+  scout: { id: 'scout', name: 'Scout', role: 'Scalping', active: true, risk: 50, allocatedFunds: '', colorHex: '#22d3ee', status: 'SLEEP', pnl: 0, swarmEngine: 'MiroFish', swarmActive: false, tradingPairs: 'ALL', signalThreshold: 0.5, stopLoss: -2, takeProfit: 3 },
+  hunter: { id: 'hunter', name: 'Hunter', role: 'Trend Following', active: false, risk: 30, allocatedFunds: '', colorHex: '#10b981', status: 'SLEEP', pnl: 0, swarmEngine: 'BettaFish', swarmActive: false, tradingPairs: 'ALL', signalThreshold: 2.5, stopLoss: -5, takeProfit: 10 },
+  grid: { id: 'grid', name: 'Grid', role: 'Market Maker', active: false, risk: 20, allocatedFunds: '', colorHex: '#a855f7', status: 'SLEEP', pnl: 0, tradingPairs: 'ALL', signalThreshold: 1.5, stopLoss: -3, takeProfit: 5 },
+  sentinel: { id: 'sentinel', name: 'Sentinel', role: 'Sentiment/News', active: true, risk: 40, allocatedFunds: '', colorHex: '#f59e0b', status: 'WATCHING', pnl: 0, tradingPairs: 'BTCUSDT, ETHUSDT', signalThreshold: 1.0, stopLoss: -10, takeProfit: 20 },
 };
 
 // --- Predictly Glassmorphism Components ---
@@ -79,14 +85,20 @@ export default function DeepSpaceDashboard() {
   const [keys, setKeys] = useState({ githubPat: '', binanceApi: '', binanceSecret: '' });
   const [isForking, setIsForking] = useState(false);
 
+  // Settings for Alerts
+  const [alertsConfig, setAlertsConfig] = useState({ winThreshold: 100, lossThreshold: -50, audioEnabled: true });
+  const [toast, setToast] = useState<{msg: string, type: 'win'|'loss'} | null>(null);
+
   // Refs for Websocket closure
   const agentsRef = useRef(agents);
   const tradingModeRef = useRef(tradingMode);
   const masterBalanceRef = useRef(masterBalance);
+  const alertsConfigRef = useRef(alertsConfig);
 
   useEffect(() => { agentsRef.current = agents; }, [agents]);
   useEffect(() => { tradingModeRef.current = tradingMode; }, [tradingMode]);
   useEffect(() => { masterBalanceRef.current = masterBalance; }, [masterBalance]);
+  useEffect(() => { alertsConfigRef.current = alertsConfig; }, [alertsConfig]);
 
   useEffect(() => {
     // Initialize PNL history exactly once mounted to prevent SSR hydration mismatch
@@ -130,13 +142,12 @@ export default function DeepSpaceDashboard() {
 
   const fetchInitialPrices = useCallback(async () => {
     try {
-      const res = await fetch('https://api.binance.com/api/v3/ticker/price');
+      const res = await fetch('https://fapi.binance.com/fapi/v1/ticker/price');
       const data = await res.json();
-      const relevantPairs = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'BNBUSDT'];
       const initialPrices: Record<string, PriceData> = {};
       data.forEach((item: any) => {
-        if (relevantPairs.includes(item.symbol)) {
-           initialPrices[item.symbol] = { price: parseFloat(item.price).toFixed(2), flux: '0.00' };
+        if (item.symbol && item.symbol.endsWith('USDT')) {
+           initialPrices[item.symbol] = { price: parseFloat(item.price).toFixed(4), flux: '0.00' };
         }
       });
       setPrices(prev => ({ ...prev, ...initialPrices }));
@@ -144,6 +155,40 @@ export default function DeepSpaceDashboard() {
       systemLog(`[ERROR] Binance API Connection Failed: ${e.message}`, 'System', '#f43f5e');
     }
   }, [systemLog]);
+
+  const playAlert = useCallback((type: 'win' | 'loss') => {
+    if (!alertsConfigRef.current.audioEnabled) return;
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      if (type === 'win') {
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(600, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(1200, ctx.currentTime + 0.1);
+        gain.gain.setValueAtTime(0.3, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.3);
+      } else {
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(300, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(150, ctx.currentTime + 0.2);
+        gain.gain.setValueAtTime(0.3, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.4);
+      }
+      osc.start();
+      osc.stop(ctx.currentTime + 0.4);
+    } catch(e) {}
+  }, []);
+
+  const showToast = useCallback((msg: string, type: 'win' | 'loss') => {
+    setToast({ msg, type });
+    playAlert(type);
+    setTimeout(() => setToast(null), 4000);
+  }, [playAlert]);
 
   // Load from LocalStorage
   useEffect(() => {
@@ -156,6 +201,28 @@ export default function DeepSpaceDashboard() {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setKeys({ binanceApi: bApi, binanceSecret: bSec, githubPat: gPat });
       setTradingMode(mode);
+
+      const savedAlerts = localStorage.getItem('ALERTS_CONFIG');
+      if (savedAlerts) {
+         try { setAlertsConfig(JSON.parse(savedAlerts)); } catch(e) {}
+      }
+
+      const savedAgentsConf = localStorage.getItem('AGENT_CONFIGS');
+      if (savedAgentsConf) {
+         try {
+           const parsedConf = JSON.parse(savedAgentsConf);
+           setAgents(prev => {
+             const merged = { ...prev };
+             for (const key in merged) {
+               const id = key as AgentId;
+               if (parsedConf[id]) {
+                 merged[id] = { ...merged[id], ...parsedConf[id] };
+               }
+             }
+             return merged;
+           });
+         } catch(e) {}
+      }
 
       if (mode === 'real' && bApi && bSec) {
         fetchBinanceBalance(bApi, bSec);
@@ -170,7 +237,24 @@ export default function DeepSpaceDashboard() {
       localStorage.setItem('BINANCE_API_KEY', keys.binanceApi);
       localStorage.setItem('BINANCE_SECRET', keys.binanceSecret);
       localStorage.setItem('TRADING_MODE', tradingMode);
-      systemLog('All configurations and API keys saved locally.', 'System', '#a855f7');
+      localStorage.setItem('ALERTS_CONFIG', JSON.stringify(alertsConfig));
+      
+      const agentConfigsToSave = Object.fromEntries(
+         Object.values(agents).map(ag => [ag.id, {
+           tradingPairs: ag.tradingPairs,
+           signalThreshold: ag.signalThreshold,
+           stopLoss: ag.stopLoss,
+           takeProfit: ag.takeProfit,
+           allocatedFunds: ag.allocatedFunds,
+           risk: ag.risk,
+           active: ag.active,
+           swarmActive: ag.swarmActive
+         }])
+      );
+      localStorage.setItem('AGENT_CONFIGS', JSON.stringify(agentConfigsToSave));
+
+      systemLog('Ayarlar Buluta/Cihaza mühürlendi 🔒', 'System', '#a855f7');
+      showToast('Settings Saved', 'win');
       if (keys.binanceApi && keys.binanceSecret && tradingMode === 'real') {
         fetchBinanceBalance(keys.binanceApi, keys.binanceSecret);
       }
@@ -217,7 +301,11 @@ export default function DeepSpaceDashboard() {
            config: `use_paper: ${tradingModeRef.current === 'paper'}`,
            agentType: ag.id,
            risk: ag.risk,
-           allocated: numericAllocated
+           allocated: numericAllocated,
+           swarmActive: ag.swarmActive,
+           swarmEngine: ag.swarmEngine,
+           stopLoss: ag.stopLoss,
+           takeProfit: ag.takeProfit
         })
       });
       
@@ -242,6 +330,18 @@ export default function DeepSpaceDashboard() {
              [agentId]: curPnlVal + pnl
           } as PnlHistoryData].slice(-30);
         });
+
+        // Trigger configurable PnL crossing alerts
+        const prevPnl = agentsRef.current[agentId].pnl;
+        const newPnl = prevPnl + pnl;
+        const winT = alertsConfigRef.current.winThreshold;
+        const lossT = alertsConfigRef.current.lossThreshold;
+
+        if (newPnl >= winT && prevPnl < winT) {
+           showToast(`[${ag.name}] Accumulated PnL Crossed +$${winT} Milestone!`, 'win');
+        } else if (newPnl <= lossT && prevPnl > lossT) {
+           showToast(`[${ag.name}] Accumulated PnL Dropped Below -$${Math.abs(lossT)}!`, 'loss');
+        }
 
         setAgents(prev => {
           const prevAllocated = Number(prev[agentId].allocatedFunds) || 0;
@@ -272,12 +372,11 @@ export default function DeepSpaceDashboard() {
 
   // Websocket Loop
   useEffect(() => {
-    if (activePairs.length === 0) return;
-    const wsUrl = 'wss://fstream.binance.com/ws/' + activePairs.map(p => `${p}@ticker`).join('/');
+    const wsUrl = 'wss://fstream.binance.com/ws/!ticker@arr';
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {
-      systemLog('[SYSTEM] Connected to Binance Futures Streams (Real-time)', 'Network', '#10b981');
+      systemLog('[SYSTEM] Connected to Binance Futures Streams (All Coins)', 'Network', '#10b981');
     };
 
     ws.onerror = (e) => {
@@ -286,33 +385,48 @@ export default function DeepSpaceDashboard() {
 
     ws.onmessage = (e) => {
       try {
-        const d = JSON.parse(e.data);
-        const symbol = d.s;
-        if (!symbol) return;
-        
-        const price = parseFloat(d.c).toFixed(2);
-        const fluxNum = parseFloat(d.P) * Math.sin(Date.now() / 300) * 1.5; 
-        const flux = fluxNum.toFixed(2);
-        
-        setPrices(prev => ({ ...prev, [symbol]: { price, flux } }));
+        const dataArr = JSON.parse(e.data);
+        if (!Array.isArray(dataArr)) return;
 
-        Object.values(agentsRef.current).forEach(ag => {
-          if (ag.active && ag.status === 'WATCHING') {
-            let threshold = 1.0;
-            if (ag.id === 'scout') threshold = 0.5;
-            if (ag.id === 'hunter') threshold = 2.5;
-            if (ag.id === 'grid') threshold = 1.5;
+        const newPrices: Record<string, PriceData> = {};
+        
+        dataArr.forEach((d: any) => {
+          const symbol = d.s;
+          if (!symbol || !symbol.endsWith('USDT')) return;
+          
+          const price = parseFloat(d.c).toFixed(4);
+          const fluxNum = parseFloat(d.P) * Math.sin(Date.now() / 300) * 1.5; 
+          const flux = fluxNum.toFixed(2);
+          
+          newPrices[symbol] = { price, flux };
 
-            if (Math.abs(fluxNum) >= threshold && Math.random() > 0.95) {
-              triggerAgent(symbol, price, fluxNum, ag.id);
+          Object.values(agentsRef.current).forEach(ag => {
+            if (ag.active && ag.status === 'WATCHING') {
+              
+              // Check trading pairs logic (if not ALL)
+              if (ag.tradingPairs && ag.tradingPairs.toUpperCase() !== 'ALL') {
+                const allowedPairs = ag.tradingPairs.toUpperCase().split(',').map(s => s.trim());
+                if (!allowedPairs.includes(symbol.toUpperCase())) {
+                  return; // Skip if pair is not allowed
+                }
+              }
+
+              const threshold = ag.signalThreshold !== undefined ? ag.signalThreshold : 1.0;
+
+              // Reduced probability slightly since we are scanning ~300 coins instead of 4
+              if (Math.abs(fluxNum) >= threshold && Math.random() > 0.99) {
+                triggerAgent(symbol, price, fluxNum, ag.id);
+              }
             }
-          }
+          });
         });
+
+        setPrices(prev => ({ ...prev, ...newPrices }));
       } catch (err) {}
     };
 
     return () => ws.close();
-  }, [activePairs, triggerAgent, systemLog]);
+  }, [triggerAgent, systemLog, showToast]);
 
 
   // Budget Mechanics
@@ -352,17 +466,37 @@ export default function DeepSpaceDashboard() {
     });
   };
 
+  const toggleSwarm = (id: AgentId) => {
+    setAgents(prev => ({ 
+      ...prev, 
+      [id]: { 
+         ...prev[id], 
+         swarmActive: !prev[id].swarmActive 
+      } 
+    }));
+  };
+
   const setRisk = (id: AgentId, riskValue: number) => {
     setAgents(prev => ({ ...prev, [id]: { ...prev[id], risk: riskValue } }));
   };
 
+  const updateSettings = (id: AgentId, field: keyof Agent, value: any) => {
+    setAgents(prev => ({ ...prev, [id]: { ...prev[id], [field]: value } }));
+  };
+
   const toggleGlobalMode = () => {
     const newMode = tradingMode === 'paper' ? 'real' : 'paper';
-    setTradingMode(newMode);
+    
     if(newMode === 'real') {
+       if (typeof window !== 'undefined') {
+         const confirmReal = window.confirm("WARNING: You are enabling REAL TRADING.\n\nReal orders will be executed using your configured Binance API key, and real funds are at risk.\n\nAre you absolutely sure you want to proceed?");
+         if (!confirmReal) return;
+       }
+       setTradingMode(newMode);
        systemLog(`[WARNING] REAL TRADING ENGAGED. BINANCE API WILL EXECUTE LIVE ORDERS.`, 'System', '#f43f5e');
        if (keys.binanceApi && keys.binanceSecret) fetchBinanceBalance(keys.binanceApi, keys.binanceSecret);
     } else {
+       setTradingMode(newMode);
        systemLog(`System reverted to PAPER Simulation.`, 'System', '#22d3ee');
     }
     // Auto-save setting
@@ -423,6 +557,16 @@ export default function DeepSpaceDashboard() {
           </div>
         </div>
       </header>
+
+      {/* Floating Toast Notification */}
+      {toast && (
+        <div className="fixed top-24 left-1/2 -translate-x-1/2 z-50 animate-in slide-in-from-top-4 fade-in duration-300">
+          <div className={`px-6 py-3 rounded-full flex items-center gap-3 shadow-[0_10px_40px_-10px_rgba(0,0,0,0.8)] backdrop-blur-md border ${toast.type === 'win' ? 'bg-[#10b981]/20 border-[#10b981]/50 text-[#10b981]'  : 'bg-[#f43f5e]/20 border-[#f43f5e]/50 text-[#f43f5e]'}`}>
+            {toast.type === 'win' ? <TrendingUp className="w-5 h-5" /> : <Zap className="w-5 h-5" />}
+            <span className="font-bold text-sm tracking-wide">{toast.msg}</span>
+          </div>
+        </div>
+      )}
 
       {/* Main Content Area */}
       <main className="max-w-7xl mx-auto">
@@ -541,6 +685,61 @@ export default function DeepSpaceDashboard() {
                            style={{ background: `linear-gradient(to right, ${ag.colorHex} ${ag.risk}%, rgba(255,255,255,0.05) ${ag.risk}%)` }}
                          />
                       </div>
+
+                      {/* Advanced Settings */}
+                      <div className="grid grid-cols-2 gap-3 pt-2">
+                        <div>
+                           <label className="block text-[9px] uppercase font-bold text-slate-500 mb-1">Trading Pairs</label>
+                           <input 
+                             type="text" value={ag.tradingPairs} onChange={(e) => updateSettings(ag.id, 'tradingPairs', e.target.value)} disabled={!ag.active}
+                             className="w-full bg-white/[0.02] border border-white/5 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-white/20 disabled:opacity-50"
+                             placeholder="ALL or BTCUSDT"
+                           />
+                        </div>
+                        <div>
+                           <label className="block text-[9px] uppercase font-bold text-slate-500 mb-1">Threshold (σ)</label>
+                           <input 
+                             type="number" step="0.1" value={ag.signalThreshold} onChange={(e) => updateSettings(ag.id, 'signalThreshold', parseFloat(e.target.value))} disabled={!ag.active}
+                             className="w-full bg-white/[0.02] border border-white/5 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-white/20 disabled:opacity-50"
+                           />
+                        </div>
+                        <div>
+                           <label className="block text-[9px] uppercase font-bold text-[#10b981] mb-1">Take Profit (%)</label>
+                           <input 
+                             type="number" step="0.5" value={ag.takeProfit} onChange={(e) => updateSettings(ag.id, 'takeProfit', parseFloat(e.target.value))} disabled={!ag.active}
+                             className="w-full bg-[#10b981]/5 border border-[#10b981]/10 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-[#10b981]/30 disabled:opacity-50"
+                           />
+                        </div>
+                        <div>
+                           <label className="block text-[9px] uppercase font-bold text-[#f43f5e] mb-1">Stop Loss (-%)</label>
+                           <input 
+                             type="number" step="0.5" value={ag.stopLoss} onChange={(e) => updateSettings(ag.id, 'stopLoss', parseFloat(e.target.value))} disabled={!ag.active}
+                             className="w-full bg-[#f43f5e]/5 border border-[#f43f5e]/10 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-[#f43f5e]/30 disabled:opacity-50"
+                           />
+                        </div>
+                      </div>
+
+                      {/* Swarm Engine Toggle */}
+                      {ag.swarmEngine && (
+                        <div className="pt-2 flex justify-between items-center border-t border-white/5 mt-4 pt-4">
+                          <div className="flex flex-col">
+                            <span className="text-[10px] font-bold uppercase text-slate-400 tracking-wider flex items-center gap-1">
+                              Swarm Protocol <span className="text-[8px] px-1.5 py-0.5 rounded-full bg-white/10 text-white/60">{ag.swarmEngine}</span>
+                            </span>
+                            <span className="text-[9px] text-white/30 mt-1">Deploy multiple sub-nodes for higher accuracy.</span>
+                          </div>
+                          <button 
+                            onClick={(e) => { e.stopPropagation(); toggleSwarm(ag.id); }}
+                            disabled={!ag.active}
+                            className={`w-10 h-5 rounded-full p-0.5 transition-all duration-300 relative disabled:opacity-50 ${ag.swarmActive ? 'bg-[#a855f7]/40' : 'bg-black/40'}`}
+                          >
+                             <div 
+                               className={`w-4 h-4 rounded-full transition-all duration-300 shadow-lg ${ag.swarmActive ? 'translate-x-[20px] bg-[#a855f7]' : 'translate-x-0 bg-slate-500'}`}
+                               style={{ boxShadow: ag.swarmActive ? `0 0 10px #a855f7` : '' }}
+                             />
+                          </button>
+                        </div>
+                      )}
 
                     </div>
                   </GlassCard>
@@ -671,6 +870,38 @@ export default function DeepSpaceDashboard() {
                      className="w-full bg-white/[0.02] backdrop-blur-[10px] border border-white/10 focus:border-[#22d3ee] focus:shadow-[0_0_15px_rgba(34,211,238,0.4)] rounded-xl px-4 py-3 text-sm text-white focus:outline-none transition-all duration-300"
                    />
                 </div>
+                
+                <div className="pt-4 border-t border-white/5">
+                   <h4 className="text-[10px] text-slate-300 uppercase font-bold tracking-wider mb-4">Real-Time PnL Alerts</h4>
+                   
+                   <div className="grid grid-cols-2 gap-4 mb-4">
+                     <div>
+                        <label className="block text-[9px] uppercase font-bold text-[#10b981] mb-1">Win Threshold ($)</label>
+                        <input 
+                          type="number" value={alertsConfig.winThreshold} onChange={(e) => setAlertsConfig({...alertsConfig, winThreshold: parseFloat(e.target.value)})}
+                          className="w-full bg-[#10b981]/5 border border-[#10b981]/10 focus:border-[#10b981]/40 rounded-xl px-4 py-2 text-sm text-white focus:outline-none transition-all duration-300"
+                        />
+                     </div>
+                     <div>
+                        <label className="block text-[9px] uppercase font-bold text-[#f43f5e] mb-1">Loss Threshold (-$)</label>
+                        <input 
+                          type="number" value={Math.abs(alertsConfig.lossThreshold)} onChange={(e) => setAlertsConfig({...alertsConfig, lossThreshold: -Math.abs(parseFloat(e.target.value))})}
+                          className="w-full bg-[#f43f5e]/5 border border-[#f43f5e]/10 focus:border-[#f43f5e]/40 rounded-xl px-4 py-2 text-sm text-white focus:outline-none transition-all duration-300"
+                        />
+                     </div>
+                   </div>
+
+                   <div className="flex justify-between items-center bg-white/[0.02] border border-white/5 rounded-xl px-4 py-3">
+                     <span className="text-xs font-bold text-slate-300 tracking-wider">Audio Alerts</span>
+                     <button 
+                       onClick={() => setAlertsConfig({...alertsConfig, audioEnabled: !alertsConfig.audioEnabled})}
+                       className={`w-12 h-6 rounded-full p-1 transition-all duration-300 relative shadow-inner ${alertsConfig.audioEnabled ? 'bg-[#a855f7]' : 'bg-white/10'}`}
+                     >
+                       <div className={`w-4 h-4 rounded-full bg-white transition-all duration-300 shadow-md ${alertsConfig.audioEnabled ? 'translate-x-6' : 'translate-x-0'}`} />
+                     </button>
+                   </div>
+                </div>
+
                 <div className="pt-4 flex flex-col gap-3">
                   <button 
                     onClick={saveSettings}

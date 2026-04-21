@@ -3,7 +3,7 @@ import { NextResponse } from 'next/server';
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { symbol, price, flux, config, agentType = 'generic', risk = 50, allocated = 0 } = body;
+    const { symbol, price, flux, config, agentType = 'generic', risk = 50, allocated = 0, swarmActive = false, swarmEngine = '' } = body;
 
     // Simulate parsing config.yaml
     const thresholdMatch = config.match(/threshold_sigma:\s*([0-9.]+)/);
@@ -17,7 +17,8 @@ export async function POST(req: Request) {
     
     // Simulate computational processing time slightly differently per agent type
     const delayMap: Record<string, number> = { scout: 200, ghost: 100, grid: 800, hunter: 1000, sentinel: 1200, generic: 600 };
-    const delayMs = delayMap[agentType] || 600;
+    // Swarm engines take longer due to multiple consensus nodes
+    const delayMs = (delayMap[agentType] || 600) + (swarmActive ? 500 : 0);
     await new Promise(res => setTimeout(res, delayMs));
 
     // Agent-specific logic tweaks
@@ -31,15 +32,35 @@ export async function POST(req: Request) {
       // Predictly Engine: Trade size strictly isolated to vault * risk map
       const tradeSize = allocated * (risk / 100);
       
-      // Simulate realistic ROI per trade attempt (-3.5% to +6.5%)
-      const randomFactor = Math.random() * 2.0 - 0.7; // Bias slightly to win
+      // Calculate Win Probability Bias
+      // Normal: -0.7 to 1.3
+      let minBias = -0.7;
+      let maxBias = 2.0;
+      let winMsg = `ROI`;
+
+      if (swarmActive) {
+        if (swarmEngine === 'MiroFish') {
+          // Mirofish Swarm (Scalping): High frequency, precise micro-wins.
+          minBias = -0.3; // Much less likely to lose big
+          maxBias = 1.6;  // Consistent small to medium wins
+          winMsg = `[MiroFish Consensus: 8/10 Nodes] ROI`;
+        } else if (swarmEngine === 'BettaFish') {
+          // BettaFish Swarm (Trend): Aggressive momentum riding.
+          minBias = -0.5;
+          maxBias = 2.5; // Has huge potential wins
+          winMsg = `[BettaFish Consensus: 4/5 Nodes] ROI`;
+        }
+      }
+
+      // Simulate realistic ROI per trade attempt
+      const randomFactor = Math.random() * maxBias + minBias; 
       const roi = randomFactor * 0.05; 
       
       tradePnl = Number((tradeSize * roi).toFixed(2));
       
       let liveMessage = '';
       if (!isPaper) {
-        liveMessage = ` [LIVE ORDER SENT: POST /api/v3/order (Binance)]`;
+        liveMessage = ` [LIVE ORDER SENT]`;
       }
       
       return NextResponse.json({
@@ -50,7 +71,7 @@ export async function POST(req: Request) {
         pnl: tradePnl,
         isPaper,
         agent: agentType,
-        message: `[${agentType.toUpperCase()} CORE] Position closed. ROI: ${(roi * 100).toFixed(2)}% | Volatility: ${Math.abs(effectiveFlux).toFixed(2)}σ${liveMessage}`
+        message: `[${agentType.toUpperCase()} CORE] Position closed. ${winMsg}: ${(roi * 100).toFixed(2)}% | Volatility: ${Math.abs(effectiveFlux).toFixed(2)}σ${liveMessage}`
       });
     } else {
        return NextResponse.json({
