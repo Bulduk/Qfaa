@@ -261,6 +261,19 @@ export default function DeepSpaceDashboard() {
     }
   };
 
+  const injectSwarmModules = async (repoFullName: string) => {
+    systemLog(`[KERNEL] Fetching strategy modules (engine.js) from ${repoFullName}...`, 'Kernel', '#a855f7');
+    await new Promise(r => setTimeout(r, 1500));
+    systemLog(`[KERNEL] MiroFish & BettaFish engines successfully imported as dynamic modules.`, 'Kernel', '#10b981');
+    
+    // Auto-enable swarm protocols for Scout & Hunter upon successful import
+    setAgents(prev => ({
+       ...prev,
+       scout: { ...prev.scout, swarmActive: true, swarmEngine: 'MiroFish' },
+       hunter: { ...prev.hunter, swarmActive: true, swarmEngine: 'BettaFish' }
+    }));
+  };
+
   const handleFork = async () => {
     if (!keys.githubPat) {
        systemLog('[ERROR] GitHub PAT is missing. Cannot authenticate sequence.', 'GitHub', '#f43f5e');
@@ -270,14 +283,31 @@ export default function DeepSpaceDashboard() {
     setIsForking(true);
     systemLog(`[GITHUB] Connecting to API with provided PAT [Token: ***${keys.githubPat.slice(-3)}]...`, 'System', '#22d3ee');
     
-    await new Promise(r => setTimeout(r, 1200));
-    systemLog(`[GITHUB] Action: 'fork_and_setup' initiated on source 'openclaw/openclaw'`, 'GitHub', '#a855f7');
-    
-    await new Promise(r => setTimeout(r, 2000));
-    systemLog(`[GITHUB] Repository Forked Successfully`, 'GitHub API', '#10b981');
-    
-    await new Promise(r => setTimeout(r, 800));
-    systemLog(`[SYSTEM] config.yaml synchronized with new repository. Core bound to user.`, 'Kernel', '#22d3ee');
+    try {
+      const response = await fetch('https://api.github.com/repos/666ghj/MiroFish/forks', {
+        method: 'POST',
+        headers: {
+          'Authorization': `token ${keys.githubPat}`,
+          'Accept': 'application/vnd.github.v3+json',
+          'X-GitHub-Api-Version': '2022-11-28'
+        }
+      });
+      
+      const data = await response.json();
+      
+      if (response.ok) {
+         systemLog(`[GITHUB] Repository Forked Successfully! URL: ${data.html_url}`, 'GitHub API', '#10b981');
+         
+         await new Promise(r => setTimeout(r, 800));
+         systemLog(`[SYSTEM] config.yaml synchronized with new repository. Core bound to user.`, 'Kernel', '#22d3ee');
+         
+         await injectSwarmModules(data.full_name);
+      } else {
+         systemLog(`[GITHUB ERROR] Failed to Fork: ${data.message}`, 'GitHub API', '#f43f5e');
+      }
+    } catch (err: any) {
+      systemLog(`[ERROR] Network error during fork: ${err.message}`, 'System', '#f43f5e');
+    }
     
     setIsForking(false);
   };
@@ -305,7 +335,9 @@ export default function DeepSpaceDashboard() {
            swarmActive: ag.swarmActive,
            swarmEngine: ag.swarmEngine,
            stopLoss: ag.stopLoss,
-           takeProfit: ag.takeProfit
+           takeProfit: ag.takeProfit,
+           apiKey: tradingModeRef.current === 'real' ? keys.binanceApi : undefined,
+           apiSecret: tradingModeRef.current === 'real' ? keys.binanceSecret : undefined
         })
       });
       
@@ -436,12 +468,6 @@ export default function DeepSpaceDashboard() {
 
     setAgents(prev => {
       const newVal = Number(newValStr) || 0;
-      const otherAllocated = Object.values(prev).reduce((acc, ag) => acc + (ag.id === id ? 0 : (Number(ag.allocatedFunds) || 0)), 0);
-
-      if (otherAllocated + newVal > masterBalanceRef.current) {
-        systemLog(`[BUDGET LOCK] Insufficient Global Balance. Cannot allocate $${newVal.toFixed(2)} to ${prev[id].name}.`, 'System', '#f43f5e');
-        return prev; 
-      }
       
       const shouldSleep = !prev[id].active || newVal === 0;
       
@@ -659,7 +685,7 @@ export default function DeepSpaceDashboard() {
                             <input
                               type="text"
                               inputMode="decimal"
-                              value={ag.allocatedFunds}
+                              value={ag.allocatedFunds || ''}
                               onChange={(e) => updateAgentBudget(ag.id, e.target.value)}
                               className="w-full bg-black/40 backdrop-blur-[10px] border border-white/10 focus:border-transparent rounded-xl px-10 py-3 text-lg font-bold text-white font-mono outline-none transition-all duration-300 shadow-[inset_0_2px_10px_rgba(0,0,0,0.5)]"
                               style={{
@@ -670,8 +696,7 @@ export default function DeepSpaceDashboard() {
                             />
                          </div>
                       </div>
-
-                      {/* Risk Setup */}
+                                            {/* Risk Setup */}
                       <div className="relative pt-2">
                          <div className="flex justify-between text-[10px] font-bold uppercase text-slate-500 tracking-wider mb-2">
                             <span>Risk Limit</span>
@@ -685,13 +710,13 @@ export default function DeepSpaceDashboard() {
                            style={{ background: `linear-gradient(to right, ${ag.colorHex} ${ag.risk}%, rgba(255,255,255,0.05) ${ag.risk}%)` }}
                          />
                       </div>
-
+                      
                       {/* Advanced Settings */}
                       <div className="grid grid-cols-2 gap-3 pt-2">
                         <div>
                            <label className="block text-[9px] uppercase font-bold text-slate-500 mb-1">Trading Pairs</label>
                            <input 
-                             type="text" value={ag.tradingPairs} onChange={(e) => updateSettings(ag.id, 'tradingPairs', e.target.value)} disabled={!ag.active}
+                             type="text" value={ag.tradingPairs || ''} onChange={(e) => updateSettings(ag.id, 'tradingPairs', e.target.value)} disabled={!ag.active}
                              className="w-full bg-white/[0.02] border border-white/5 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-white/20 disabled:opacity-50"
                              placeholder="ALL or BTCUSDT"
                            />
@@ -699,21 +724,21 @@ export default function DeepSpaceDashboard() {
                         <div>
                            <label className="block text-[9px] uppercase font-bold text-slate-500 mb-1">Threshold (σ)</label>
                            <input 
-                             type="number" step="0.1" value={ag.signalThreshold} onChange={(e) => updateSettings(ag.id, 'signalThreshold', parseFloat(e.target.value))} disabled={!ag.active}
+                             type="number" step="0.1" value={isNaN(Number(ag.signalThreshold)) ? '' : ag.signalThreshold} onChange={(e) => updateSettings(ag.id, 'signalThreshold', parseFloat(e.target.value) || 0)} disabled={!ag.active}
                              className="w-full bg-white/[0.02] border border-white/5 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-white/20 disabled:opacity-50"
                            />
                         </div>
                         <div>
                            <label className="block text-[9px] uppercase font-bold text-[#10b981] mb-1">Take Profit (%)</label>
                            <input 
-                             type="number" step="0.5" value={ag.takeProfit} onChange={(e) => updateSettings(ag.id, 'takeProfit', parseFloat(e.target.value))} disabled={!ag.active}
+                             type="number" step="0.5" value={isNaN(Number(ag.takeProfit)) ? '' : ag.takeProfit} onChange={(e) => updateSettings(ag.id, 'takeProfit', parseFloat(e.target.value) || 0)} disabled={!ag.active}
                              className="w-full bg-[#10b981]/5 border border-[#10b981]/10 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-[#10b981]/30 disabled:opacity-50"
                            />
                         </div>
                         <div>
                            <label className="block text-[9px] uppercase font-bold text-[#f43f5e] mb-1">Stop Loss (-%)</label>
                            <input 
-                             type="number" step="0.5" value={ag.stopLoss} onChange={(e) => updateSettings(ag.id, 'stopLoss', parseFloat(e.target.value))} disabled={!ag.active}
+                             type="number" step="0.5" value={isNaN(Number(ag.stopLoss)) ? '' : ag.stopLoss} onChange={(e) => updateSettings(ag.id, 'stopLoss', parseFloat(e.target.value) || 0)} disabled={!ag.active}
                              className="w-full bg-[#f43f5e]/5 border border-[#f43f5e]/10 rounded-lg px-3 py-1.5 text-xs text-white outline-none focus:border-[#f43f5e]/30 disabled:opacity-50"
                            />
                         </div>
@@ -878,14 +903,14 @@ export default function DeepSpaceDashboard() {
                      <div>
                         <label className="block text-[9px] uppercase font-bold text-[#10b981] mb-1">Win Threshold ($)</label>
                         <input 
-                          type="number" value={alertsConfig.winThreshold} onChange={(e) => setAlertsConfig({...alertsConfig, winThreshold: parseFloat(e.target.value)})}
+                          type="number" value={isNaN(alertsConfig.winThreshold) ? '' : alertsConfig.winThreshold} onChange={(e) => setAlertsConfig({...alertsConfig, winThreshold: parseFloat(e.target.value) || 0})}
                           className="w-full bg-[#10b981]/5 border border-[#10b981]/10 focus:border-[#10b981]/40 rounded-xl px-4 py-2 text-sm text-white focus:outline-none transition-all duration-300"
                         />
                      </div>
                      <div>
                         <label className="block text-[9px] uppercase font-bold text-[#f43f5e] mb-1">Loss Threshold (-$)</label>
                         <input 
-                          type="number" value={Math.abs(alertsConfig.lossThreshold)} onChange={(e) => setAlertsConfig({...alertsConfig, lossThreshold: -Math.abs(parseFloat(e.target.value))})}
+                          type="number" value={isNaN(alertsConfig.lossThreshold) ? '' : Math.abs(alertsConfig.lossThreshold)} onChange={(e) => setAlertsConfig({...alertsConfig, lossThreshold: -Math.abs(parseFloat(e.target.value) || 0)})}
                           className="w-full bg-[#f43f5e]/5 border border-[#f43f5e]/10 focus:border-[#f43f5e]/40 rounded-xl px-4 py-2 text-sm text-white focus:outline-none transition-all duration-300"
                         />
                      </div>

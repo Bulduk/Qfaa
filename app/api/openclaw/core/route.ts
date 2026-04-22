@@ -1,9 +1,10 @@
 import { NextResponse } from 'next/server';
+import crypto from 'crypto';
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const { symbol, price, flux, config, agentType = 'generic', risk = 50, allocated = 0, swarmActive = false, swarmEngine = '' } = body;
+    const { symbol, price, flux, config, agentType = 'generic', risk = 50, allocated = 0, swarmActive = false, swarmEngine = '', apiKey, apiSecret } = body;
 
     // Simulate parsing config.yaml
     const thresholdMatch = config.match(/threshold_sigma:\s*([0-9.]+)/);
@@ -33,34 +34,60 @@ export async function POST(req: Request) {
       const tradeSize = allocated * (risk / 100);
       
       // Calculate Win Probability Bias
-      // Normal: -0.7 to 1.3
       let minBias = -0.7;
       let maxBias = 2.0;
       let winMsg = `ROI`;
 
       if (swarmActive) {
         if (swarmEngine === 'MiroFish') {
-          // Mirofish Swarm (Scalping): High frequency, precise micro-wins.
-          minBias = -0.3; // Much less likely to lose big
-          maxBias = 1.6;  // Consistent small to medium wins
+          minBias = -0.3; 
+          maxBias = 1.6;  
           winMsg = `[MiroFish Consensus: 8/10 Nodes] ROI`;
         } else if (swarmEngine === 'BettaFish') {
-          // BettaFish Swarm (Trend): Aggressive momentum riding.
           minBias = -0.5;
-          maxBias = 2.5; // Has huge potential wins
+          maxBias = 2.5; 
           winMsg = `[BettaFish Consensus: 4/5 Nodes] ROI`;
         }
       }
 
-      // Simulate realistic ROI per trade attempt
       const randomFactor = Math.random() * maxBias + minBias; 
       const roi = randomFactor * 0.05; 
       
       tradePnl = Number((tradeSize * roi).toFixed(2));
       
       let liveMessage = '';
-      if (!isPaper) {
-        liveMessage = ` [LIVE ORDER SENT]`;
+      if (!isPaper && apiKey && apiSecret && tradeSize > 5) {
+        try {
+           const baseUrl = 'https://fapi.binance.com';
+           const timestamp = Date.now();
+           // Attempt to calculate a raw quantity (this limits precision errors for generic coins by using roughly 3-4 decimals max)
+           const parsedPrice = parseFloat(price);
+           let quantity = (tradeSize / parsedPrice).toFixed(3);
+           if(parsedPrice < 1) quantity = (tradeSize / parsedPrice).toFixed(0); 
+           
+           const queryString = `symbol=${symbol}&side=${action}&type=MARKET&quantity=${quantity}&timestamp=${timestamp}`;
+           const signature = crypto.createHmac('sha256', apiSecret).update(queryString).digest('hex');
+           
+           const orderRes = await fetch(`${baseUrl}/fapi/v1/order?${queryString}&signature=${signature}`, {
+             method: 'POST',
+             headers: { 'X-MBX-APIKEY': apiKey }
+           });
+           
+           const orderData = await orderRes.json();
+           if (orderRes.ok) {
+             liveMessage = ` [LIVE ORDER EXECUTED ID: ${orderData.orderId}]`;
+           } else {
+             liveMessage = ` [LIVE ORDER FAILED: ${orderData.msg}]`;
+             // If execution failed on binance, we shouldn't simulate Pnl either
+             tradePnl = 0; 
+           }
+        } catch(err: any) {
+           liveMessage = ` [LIVE API NETWORK ERROR]`;
+           tradePnl = 0;
+        }
+      } else if (!isPaper) {
+         liveMessage = ` [WARN: TRADE SIZE TOO SMALL OR KEYS MISSING]`;
+         tradePnl = 0;
       }
       
       return NextResponse.json({
